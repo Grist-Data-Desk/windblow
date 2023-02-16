@@ -257,7 +257,7 @@ windrose(circular(wK5Off$dir,
          main = paste0("K5 Off, n = ",nrow(wK5Off)))
 ```
 
-![](/Users/claytonaldern/Developer/gristy/windblow/img/png/windrose-speeds-1.svg)<!-- -->
+![](/Users/claytonaldern/Developer/gristy/windblow/img/png/windrose-speeds-1.png)<!-- -->
 Let's also look at windroses that use SO2 figures as the magnitude:
 
 ```r
@@ -444,7 +444,7 @@ windrose(circular(filter(stash,year(date)==2019 & K4Off)$dir,
          main = paste0("K4 Off, 2019, n = ",nrow(filter(stash,year(date)==2019 & K4Off))))
 ```
 
-![](/Users/claytonaldern/Developer/gristy/windblow/img/png/K4-1.svg)<!-- -->
+![](/Users/claytonaldern/Developer/gristy/windblow/img/png/K4-1.png)<!-- -->
 i.e. the southerly bias from 2017 appears to disappear.
 
 Really, though, the main takeaway here is that we're going to exclude K4 from the rest of our analysis -- not by excluding the rows in question, but by ignoring its contribution to kiln states.
@@ -724,7 +724,7 @@ ggplot(m, aes(x = x, y = mn)) +
 ## `geom_smooth()` using method = 'loess' and formula 'y ~ x'
 ```
 
-![](/Users/claytonaldern/Developer/gristy/windblow/img/png/transition-periods-1.svg)<!-- -->
+![](/Users/claytonaldern/Developer/gristy/windblow/img/png/transition-periods-1.png)<!-- -->
 Which would seem to suggest that, on median, the shutdowns tend to occur in advance of an uptick in SO2 concentration measured at the monitor.
 
 ## Modeling

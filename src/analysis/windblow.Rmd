@@ -153,7 +153,7 @@ wNotK4Off <- w %>% filter(K2Off | K3Off | K5Off)
 ## Analysis
 
 And let's take a peek at some windrose plots.
-```{r windrose-speeds, fig.width=6, fig.height=12, cache=TRUE, dev="svg"}
+```{r windrose-speeds, fig.width=6, fig.height=12, cache=TRUE}
 par(mfrow=c(4,2))
 
 windrose(circular(wAllOn$dir,
@@ -348,7 +348,7 @@ The tl;dr on K4 is that it's down when it's being rebuilt:
 ggplot(w,aes(date,K4Off)) + geom_point()
 ```
 By the way, something interesting happens pre/post-rebuild:
-```{r K4, fig.width=6, fig.height=9, cache=TRUE, dev="svg"}
+```{r K4, fig.width=6, fig.height=9, cache=TRUE}
 par(mfrow=c(3,2))
 
 windrose(circular(filter(stash,year(date)==2017 & !anyOff)$dir,
@@ -511,7 +511,7 @@ ks.test(filter(wdf,grouping==0)$peak, filter(wdf,grouping==1)$peak)
 Broadly, we can say we're looking at two different distributions. Kiln-off states tend to be associated with lower SO2 readings, higher wind speeds, and southerly (north-blowing) winds.
 
 One quick question: What's happening in the 24 hours pre/post shutdown? That is, on median, what conditions precede and proceed the decision to shut down a kiln?
-```{r transition-periods, dev="svg"}
+```{r transition-periods}
 offEffect <- wdf %>% 
   mutate(turnOff = ifelse(lag(grouping)==0 & grouping==1,1,0))
 offEffect$turnOff <- as.factor(offEffect$turnOff)
