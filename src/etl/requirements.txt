@@ -1,0 +1,6 @@
+ipython==8.2.0
+pandas==1.0.3
+PyPDF2==1.27.3
+session_info==1.0.0
+tabula==1.0.5
+tabula_py==2.1.0

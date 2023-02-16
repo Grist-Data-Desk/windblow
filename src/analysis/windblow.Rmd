@@ -1,0 +1,874 @@
+---
+title: "Any way the wind blows"
+author: "Clayton Aldern for Grist / The Houston Chronicle / The Beaumont Enterprise"
+subtitle: "Comparing kiln shutdowns to wind direction"
+date: "February 2023"
+output:
+  html_document:
+    df_print: paged
+    highlight: kate
+    toc: yes
+    toc_float: yes
+    keep_md: yes
+assets:
+  css:
+  - http://fonts.googleapis.com/css?family=Raleway
+  - http://fonts.googleapis.com/css?family=Merriweather
+always_allow_html: yes
+---
+<style>
+body{
+  font-family: 'Merriweather', sans-serif;
+  font-size: 16px;
+  line-height: 24px;
+}
+
+h1,h2,h3,h4 {
+  font-family: 'Raleway', sans-serif;
+}
+</style>
+---
+
+This notebook accompanies Naveena Sadasivam and Clayton Aldern's Grist [investigation](https://grist.org/project/accountability/koch-oxbow-port-arthur-texas-clean-air-act-pollution/) into Oxbow Calcining's Port Arthur petcoke facility. Naveena reported and wrote the story; Clay authored this repository.
+
+## Setup
+```{r setup, message=FALSE, cache=FALSE}
+knitr::opts_chunk$set(fig.path = here::here("img/png/"),
+                      dev = "png",
+                      dpi = 300)
+library(here)
+library(tidyverse)
+library(skimr)
+library(lubridate)
+library(circular)
+library(mlr3verse)
+library(mlr3learners)
+library(mlr3pipelines)
+library(iml)
+library(ggplot2)
+
+# make sure you're working with the most recent version of {mlr3spatiotempcv} if you're working in the experimental chunk at the end.
+# remotes::install_github("mlr-org/mlr3spatiotempcv")
+# library(mlr3spatiotempcv)
+```
+```{r constants}
+PALETTE = c("#d3c8ff",
+            "#ac00e8",
+            "#f5515b",
+            "#3c3830")
+BINS = 36 #bins
+INCREMENT_WIND = 8 #mph
+INCREMENT_SO2 = 5 #ppb
+CLASS_MIN = 60 #instances
+AUTOCORR_WINDOW = 10 #hours
+N_KILNS_OFF = 1 #kilns
+```
+### Load and format data
+
+Here's the dataset we grabbed from that 5,000-page PDF.
+```{r load}
+w <- read_csv(here('dat/clean/csv/windspeedData.csv'),
+              col_types = cols(
+                Date = col_character(),
+                Count = col_double(),
+                `Sulfur Dioxide` = col_character(),
+                `Wind Speed – Scalar` = col_double(),
+                `Wind Direction – Resultant` = col_double(),
+                `Peak Wind Gust` = col_double(),
+                `Outdoor Temperature (ºF)` = col_double(),
+                Grouping = col_character()
+                )
+              )
+
+colnames(w) <- c("date",
+                 "count",
+                 "so2",
+                 "speed",
+                 "dir",
+                 "peak",
+                 "temp",
+                 "grouping")
+
+w$date <- w$date %>% parse_date_time(orders = c("%m/%d/%y %H:%M",
+                                                "%m/%d/%Y %H:%M"))
+w$so2 <- w$so2 %>% gsub("‐","-",.) %>% as.numeric()
+```
+Let's add some flags based on the Grouping variable corresponding to whether a kiln is off at a given point in time. We also want to filter the dataset to the time period after 'experiments' have ended.
+```{r flag}
+w <- w %>% mutate(K2Off = ifelse(grepl("K2Off",
+                                        grouping,
+                                        fixed = T),
+                                  T,
+                                  F))
+
+w <- w %>% mutate(K3Off = ifelse(grepl("K3Off",
+                                        grouping,
+                                        fixed = T),
+                                  T,
+                                  F))
+
+w <- w %>% mutate(K4Off = ifelse(grepl("K4Off",
+                                        grouping,
+                                        fixed = T),
+                                  T,
+                                  F))
+
+w <- w %>% mutate(K5Off = ifelse(grepl("K5Off",
+                                        grouping,
+                                        fixed = T),
+                                  T,
+                                  F))
+
+w <- w %>% mutate(anyOff = ifelse(grepl("Off",
+                                        grouping,
+                                        fixed = T),
+                                  T,
+                                  F))
+
+w <- w %>% mutate(allOff = ifelse(grepl("K2Off‐K3Off‐K4Off‐K5Off",
+                                        grouping,
+                                        fixed = T),
+                                  T,
+                                  F))
+
+w <- w %>% mutate(K3K5Off = ifelse(grepl("K2HS‐K3Off‐K4HS‐K5Off",
+                                        grouping,
+                                        fixed = T),
+                                  T,
+                                  F))
+
+stash <- w #in case we need a copy of the original df later; it's not too big
+w <- w %>% filter(date > as.Date("2018-08-01")) #i.e. post-'experiments'
+
+wK2Off <- w %>% filter(K2Off)
+wK3Off <- w %>% filter(K3Off)
+wK4Off <- w %>% filter(K4Off)
+wK5Off <- w %>% filter(K5Off)
+wAnyOff <- w %>% filter(anyOff)
+wAllOn <- w %>% filter(!anyOff)
+wAllOff <- w %>% filter(allOff)
+wK3K5Off <- w %>% filter(K3K5Off)
+wNotK4Off <- w %>% filter(K2Off | K3Off | K5Off)
+```
+## Analysis
+
+And let's take a peek at some windrose plots.
+```{r windrose-speeds, fig.width=6, fig.height=12, cache=TRUE, dev="svg"}
+par(mfrow=c(4,2))
+
+windrose(circular(wAllOn$dir,
+                  units = "degrees",
+                  template = "geographics"),
+         wAllOn$speed,
+         bins = BINS,
+         increment = INCREMENT_WIND,
+         ticks = F,
+         label.freq = T,
+         fill.col = PALETTE,
+         right = TRUE,
+         main = paste0("All Kilns On, n = ",nrow(wAllOn)))
+
+windrose(circular(wAllOff$dir,
+                  units = "degrees",
+                  template = "geographics"),
+         wAllOff$speed,
+         bins = BINS,
+         increment = INCREMENT_WIND,
+         ticks = F,
+         label.freq = T,
+         fill.col = PALETTE,
+         main = paste0("All Kilns Off, n = ",nrow(wAllOff)))
+
+windrose(circular(wAnyOff$dir,
+                  units = "degrees",
+                  template = "geographics"),
+         wAnyOff$speed,
+         bins = BINS,
+         increment = INCREMENT_WIND,
+         ticks = F,
+         label.freq = T,
+         fill.col = PALETTE,
+         main = paste0("Any Kiln(s) Off, n = ",nrow(wAnyOff)))
+
+windrose(circular(wK3K5Off$dir,
+                  units = "degrees",
+                  template = "geographics"),
+         wK3K5Off$speed,
+         bins = BINS,
+         increment = INCREMENT_WIND,
+         ticks = F,
+         label.freq = T,
+         fill.col = PALETTE,
+         main = paste0("K3 and K5 Off, n = ",nrow(wK3K5Off)))
+
+windrose(circular(wK2Off$dir,
+                  units = "degrees",
+                  template = "geographics"),
+         wK2Off$speed,
+         bins = BINS,
+         increment = INCREMENT_WIND,
+         ticks = F,
+         label.freq = T,
+         fill.col = PALETTE,
+         main = paste0("K2 Off, n = ",nrow(wK2Off)))
+
+windrose(circular(wK3Off$dir,
+                  units = "degrees",
+                  template = "geographics"),
+         wK3Off$speed,
+         bins = BINS,
+         increment = INCREMENT_WIND,
+         ticks = F,
+         label.freq = T,
+         fill.col = PALETTE,
+         main = paste0("K3 Off, n = ",nrow(wK3Off)))
+
+windrose(circular(wK4Off$dir,
+                  units = "degrees",
+                  template = "geographics"),
+         wK4Off$speed,
+         bins = BINS,
+         increment = INCREMENT_WIND,
+         ticks = F,
+         label.freq = T,
+         fill.col = PALETTE,
+         main = paste0("K4 Off, n = ",nrow(wK4Off)))
+
+windrose(circular(wK5Off$dir,
+                  units = "degrees",
+                  template = "geographics"),
+         wK5Off$speed,
+         bins = BINS,
+         increment = INCREMENT_WIND,
+         ticks = F,
+         label.freq = T,
+         fill.col = PALETTE,
+         main = paste0("K5 Off, n = ",nrow(wK5Off)))
+```
+Let's also look at windroses that use SO2 figures as the magnitude:
+```{r windrose-SO2, fig.width=6, fig.height=12, cache=TRUE}
+par(mfrow=c(4,2))
+
+windrose(circular(wAllOn$dir,
+                  units = "degrees",
+                  template = "geographics"),
+         wAllOn$so2,
+         bins = BINS,
+         increment = INCREMENT_SO2,
+         ticks = F,
+         label.freq = T,
+         fill.col = PALETTE,
+         main = paste0("All Kilns On, n = ",nrow(wAllOn)))
+
+windrose(circular(wAllOff$dir,
+                  units = "degrees",
+                  template = "geographics"),
+         wAllOff$so2,
+         bins = BINS,
+         increment = INCREMENT_SO2,
+         ticks = F,
+         label.freq = T,
+         fill.col = PALETTE,
+         main = paste0("All Kilns Off, n = ",nrow(wAllOff)))
+
+windrose(circular(wAnyOff$dir,
+                  units = "degrees",
+                  template = "geographics"),
+         wAnyOff$so2,
+         bins = BINS,
+         increment = INCREMENT_SO2,
+         ticks = F,
+         label.freq = T,
+         fill.col = PALETTE,
+         main = paste0("Any Kiln(s) Off, n = ",nrow(wAnyOff)))
+
+windrose(circular(wK3K5Off$dir,
+                  units = "degrees",
+                  template = "geographics"),
+         wK3K5Off$so2,
+         bins = BINS,
+         increment = INCREMENT_SO2,
+         ticks = F,
+         label.freq = T,
+         fill.col = PALETTE,
+         main = paste0("K3 and K5 Off, n = ",nrow(wK3K5Off)))
+
+windrose(circular(wK2Off$dir,
+                  units = "degrees",
+                  template = "geographics"),
+         wK2Off$so2,
+         bins = BINS,
+         increment = INCREMENT_SO2,
+         ticks = F,
+         label.freq = T,
+         fill.col = PALETTE,
+         main = paste0("K2 Off, n = ",nrow(wK2Off)))
+
+windrose(circular(wK3Off$dir,
+                  units = "degrees",
+                  template = "geographics"),
+         wK3Off$so2,
+         bins = BINS,
+         increment = INCREMENT_SO2,
+         ticks = F,
+         label.freq = T,
+         fill.col = PALETTE,
+         main = paste0("K3 Off, n = ",nrow(wK3Off)))
+
+windrose(circular(wK4Off$dir,
+                  units = "degrees",
+                  template = "geographics"),
+         wK4Off$so2,
+         bins = BINS,
+         increment = INCREMENT_SO2,
+         ticks = F,
+         label.freq = T,
+         fill.col = PALETTE,
+         main = paste0("K4 Off, n = ",nrow(wK4Off)))
+
+windrose(circular(wK5Off$dir,
+                  units = "degrees",
+                  template = "geographics"),
+         wK5Off$so2,
+         bins = BINS,
+         increment = INCREMENT_SO2,
+         ticks = F,
+         label.freq = T,
+         fill.col = PALETTE,
+         main = paste0("K5 Off, n = ",nrow(wK5Off)))
+```
+Okay. So we're looking at a non-uniform wind distribution (expected) that appears to differ meaningfully between kiln states. We'll want to run some proper stats to understand these differences (and ultimately model states as a function of environmental conditions and readings at the monitor).
+
+One immediate question, given the windroses above, is what the heck is going on with Kiln 4 (K4)? When is it down? Why does its windrose look different from other kiln states?
+
+### We Don't Talk About K4
+
+The tl;dr on K4 is that it's down when it's being rebuilt:
+```{r K4-time}
+ggplot(w,aes(date,K4Off)) + geom_point()
+```
+By the way, something interesting happens pre/post-rebuild:
+```{r K4, fig.width=6, fig.height=9, cache=TRUE, dev="svg"}
+par(mfrow=c(3,2))
+
+windrose(circular(filter(stash,year(date)==2017 & !anyOff)$dir,
+                  units = "degrees",
+                  template = "geographics"),
+         filter(stash,year(date)==2017 & !anyOff)$speed,
+         bins = BINS,
+         increment = INCREMENT_WIND,
+         ticks = F,
+         label.freq = T,
+         fill.col = PALETTE,
+         right = TRUE,
+         main = paste0("All Kilns On, 2017, n = ",nrow(filter(stash,year(date)==2017 & !anyOff))))
+
+windrose(circular(filter(stash,year(date)==2017 & K4Off)$dir,
+                  units = "degrees",
+                  template = "geographics"),
+         filter(stash,year(date)==2017 & K4Off)$speed,
+         bins = BINS,
+         increment = INCREMENT_WIND,
+         ticks = F,
+         label.freq = T,
+         fill.col = PALETTE,
+         right = TRUE,
+         main = paste0("K4 Off, 2017, n = ",nrow(filter(stash,year(date)==2017 & K4Off))))
+
+windrose(circular(filter(stash,year(date)==2018 & !anyOff)$dir,
+                  units = "degrees",
+                  template = "geographics"),
+         filter(stash,year(date)==2018 & !anyOff)$speed,
+         bins = BINS,
+         increment = INCREMENT_WIND,
+         ticks = F,
+         label.freq = T,
+         fill.col = PALETTE,
+         right = TRUE,
+         main = paste0("All Kilns On, 2018, n = ",nrow(filter(stash,year(date)==2018 & !anyOff))))
+
+windrose(circular(filter(stash,year(date)==2018 & K4Off)$dir,
+                  units = "degrees",
+                  template = "geographics"),
+         filter(stash,year(date)==2018 & K4Off)$speed,
+         bins = BINS,
+         increment = INCREMENT_WIND,
+         ticks = F,
+         label.freq = T,
+         fill.col = PALETTE,
+         right = TRUE,
+         main = paste0("K4 Off, 2018, n = ",nrow(filter(stash,year(date)==2018 & K4Off))))
+
+windrose(circular(filter(stash,year(date)==2019 & !anyOff)$dir,
+                  units = "degrees",
+                  template = "geographics"),
+         filter(stash,year(date)==2019 & !anyOff)$speed,
+         bins = BINS,
+         increment = INCREMENT_WIND,
+         ticks = F,
+         label.freq = T,
+         fill.col = PALETTE,
+         right = TRUE,
+         main = paste0("All Kilns On, 2019, n = ",nrow(filter(stash,year(date)==2019 & !anyOff))))
+
+windrose(circular(filter(stash,year(date)==2019 & K4Off)$dir,
+                  units = "degrees",
+                  template = "geographics"),
+         filter(stash,year(date)==2019 & K4Off)$speed,
+         bins = BINS,
+         increment = INCREMENT_WIND,
+         ticks = F,
+         label.freq = T,
+         fill.col = PALETTE,
+         right = TRUE,
+         main = paste0("K4 Off, 2019, n = ",nrow(filter(stash,year(date)==2019 & K4Off))))
+```
+i.e. the southerly bias from 2017 appears to disappear.
+
+Really, though, the main takeaway here is that we're going to exclude K4 from the rest of our analysis -- not by excluding the rows in question, but by ignoring its contribution to kiln states.
+
+Let's keep going. We can move away from the windrose plots and try to understand the underlying statistics of those distributions. First, a teeny bit of trig:
+```{r convert-dir}
+w$dir <- cos( w$dir * (pi/180) )
+```
+After taking the cosine above, wind direction ranges from -1 to 1, with negative values corresponding to winds blowing closer to due north (southerly winds). We got lucky with windrose conventions here, in that due north (southerly wind at 180º) corresponds to π radians. With that correspondence in mind, we can think of the windrose as the unit circle on its side. The trigonometric transformation basically grabs the x-coordinate from the unit circle.
+
+### Downsampling
+
+Anyway. We're taking 5-minute measurements; presumably there's some temporal autocorrelation here that'll bias a model.
+```{r acf, cache=TRUE}
+w %>% select(so2) %>% drop_na() %>% acf(lag.max = 120)
+```
+Yeah, quite a bit. We'll want to keep an eye out for that effect during modeling. To address it, we'll downsample the data to the hourly level (which we need to do anyway to match the resolution of the NOAA data later on) and then downsample it a second time using intervals of random length. We'll need some helper functions for that...
+```{r helper-funs, cache=TRUE}
+# random intervals to deal with temporal autocorrelation
+get_intervals <- function(df) {
+  set.seed(206)
+  iv <- rep(NA, nrow(df))
+  i <- 1
+  j <- 1
+  while (j <= nrow(df)) {
+    il <- round(runif(1,1,AUTOCORR_WINDOW))
+    iv[j:(j+il-1)] <- rep(i,il)
+    i <- i + 1
+    j <- j + il
+  }
+  iv <- iv[1:nrow(df)]
+  return(iv)
+}
+
+# easy slope over an interval
+slope <- function(x) {
+  last(x) - first(x)
+}
+```
+Let's start with the hourly resolution:
+```{r downsample-df, cache=TRUE}
+wdf <- w %>% 
+  group_by(grouping) %>% 
+  filter(n() >= CLASS_MIN) %>% 
+  select(grouping,
+         date,
+         so2:peak) %>%
+  ungroup() %>%
+  mutate_if(is.numeric,
+            ~replace_na(.,mean(., na.rm = TRUE))) %>%
+  drop_na() %>%
+  mutate(y = year(date),
+         m = month(date), 
+         d = day(date),
+         h = hour(date)) %>%
+  group_by(y,m,d,h) %>%
+  summarise(across(grouping:date, first),
+            across(so2:peak, mean, na.rm = TRUE)) %>%
+  ungroup() %>%
+  select(grouping:peak)
+
+wdf$grouping <- as.factor(wdf$grouping)
+
+# BINOMIAL
+# levels(wdf$grouping) <- as.integer(str_count(levels(wdf$grouping), 'Off') >= N_KILNS_OFF)
+levels(wdf$grouping) <- c(0,1,0,1,1,1,1,1,1,1) # one or more kilns are off (ignoring K4)
+
+# MULTINOMIAL
+# levels(wdf$grouping) <- as.integer(str_count(levels(wdf$grouping), 'Off'))
+
+glimpse(wdf)
+```
+Great. We have some semblance of a clean dataset.
+
+### Descriptive statistics
+
+Before going any further, a few tests and charts to wrap our heads around the differences between the kiln states in question:
+```{r dist-stats}
+wdf %>% group_by(grouping) %>% select(so2,speed,dir,peak) %>% skim() %>% ungroup()
+
+ks.test(filter(wdf,grouping==0)$so2, filter(wdf,grouping==1)$so2)
+ks.test(filter(wdf,grouping==0)$speed, filter(wdf,grouping==1)$speed)
+ks.test(filter(wdf,grouping==0)$dir, filter(wdf,grouping==1)$dir)
+ks.test(filter(wdf,grouping==0)$peak, filter(wdf,grouping==1)$peak)
+```
+Broadly, we can say we're looking at two different distributions. Kiln-off states tend to be associated with lower SO2 readings, higher wind speeds, and southerly (north-blowing) winds.
+
+One quick question: What's happening in the 24 hours pre/post shutdown? That is, on median, what conditions precede and proceed the decision to shut down a kiln?
+```{r transition-periods, dev="svg"}
+offEffect <- wdf %>% 
+  mutate(turnOff = ifelse(lag(grouping)==0 & grouping==1,1,0))
+offEffect$turnOff <- as.factor(offEffect$turnOff)
+
+SOff <- 24 #hrs per slice
+offEffect <- offEffect %>% 
+  slice(rep(which(turnOff == 1), each=SOff) + 0:(SOff-1))
+i <- 1
+for (g in 1:sum(offEffect$turnOff==1)) {
+  offEffect[i:(i+SOff-1),"g"] <- g
+  offEffect[i:(i+SOff-1),"x"] <- 0:(SOff-1)
+  g <- g+1
+  i <- i+SOff
+}
+offEffect <- offEffect %>%
+  group_by(g) %>%
+  mutate(effect = (so2 - first(so2))) %>%
+  mutate(effectPct = (so2 - first(so2)) / first(so2)) %>%
+  ungroup()
+
+preEffect <- wdf %>% 
+  mutate(turnOff = ifelse(lag(grouping)==0 & grouping==1,1,0))
+preEffect$turnOff <- as.factor(preEffect$turnOff)
+
+SPre <- 24 #hrs per slice
+preEffect <- preEffect %>% 
+  slice(rep(which(turnOff == 1), each=SPre) + 0:-(SPre-1))
+i <- 1
+for (g in 1:sum(offEffect$turnOff==1)) {
+  preEffect[i:(i+SPre-1),"g"] <- g
+  preEffect[i:(i+SPre-1),"x"] <- 0:-(SPre-1)
+  g <- g+1
+  i <- i+SPre
+}
+preEffect <- preEffect %>%
+  group_by(g) %>%
+  mutate(effect = (so2 - first(so2))) %>%
+  mutate(effectPct = (so2 - first(so2)) / first(so2)) %>%
+  filter(x!=0) %>%
+  ungroup()
+
+windowEffect <- rbind(preEffect,offEffect)
+
+m <- windowEffect %>%
+  group_by(x) %>%
+  summarize(mn = median(effectPct))
+ggplot(m, aes(x = x, y = mn)) + 
+  geom_point() +
+  geom_smooth() +
+  geom_vline(xintercept = 0, linetype='dashed') +
+  scale_y_continuous(labels = scales::percent) +
+  labs(x = 'Hours pre/post shutdown',
+       y = 'SO2, median percent change (relative to kiln shutdown)') +
+  geom_segment(aes(x = 1,
+                   y = max(mn)/2,
+                   xend = 5,
+                   yend = max(mn)/2),
+               arrow = arrow(length = unit(0.25, "cm"))) +
+  geom_segment(aes(x = -1,
+                   y = max(mn)/2,
+                   xend = -5,
+                   yend = max(mn)/2),
+               arrow = arrow(length = unit(0.25, "cm"))) +
+  theme_minimal()
+```
+Which would seem to suggest that, on median, the shutdowns tend to occur in advance of an uptick in SO2 concentration measured at the monitor.
+
+## Modeling
+
+### Clean-up
+
+Alrighty, let's finish cleaning up the dataframe for modeling (most notably by downsampling across random intervals and by adding a few variables computed within those intervals).
+```{r model-df, cache=TRUE}
+wdf$interval <- get_intervals(wdf)
+wdf <- wdf %>%
+  mutate(across(so2:peak, ~ .x, .names = '{col}_sd')) %>%
+  mutate(across(so2:peak, ~ .x, .names = '{col}_slope')) %>%
+  group_by(interval) %>%
+  summarise(across(grouping:date, first),
+            across(so2:peak, mean, na.rm = TRUE),
+            across(so2_sd:peak_sd, sd, na.rm = TRUE),
+            across(so2_slope:peak_slope, slope)) %>%
+  mutate_if(is.numeric,
+            ~replace_na(.,mean(., na.rm = TRUE))) %>%
+  drop_na() %>%
+  ungroup() %>%
+  select(grouping:peak_slope)
+
+summary(wdf$grouping)/nrow(wdf)
+glimpse(wdf)
+```
+### Linear model digression
+
+By the way, it's worth looking at a quick linear model of SO2 as a function of kiln states and some of these environmental variables:
+```{r quick-lm}
+wrdf <- wdf %>% select(c(so2,grouping,speed,dir)) %>% filter(so2 > 0)
+wrdf$grouping <- as.integer(wrdf$grouping)
+wrdf <- wrdf %>% mutate(highWind = ifelse(speed > 8,1,0))
+wrdf <- wrdf %>% mutate(nearNorth = ifelse(dir < -.9,1,0))
+summary(lm(so2 ~ grouping + highWind*nearNorth, wrdf))
+```
+Basically, fewer kilns on = less SO2 observed at the monitor; high winds blowing north = more SO2 observed at the monitor. (We'd expect as much.)
+
+### Random forest
+
+Okay -- so can we recover kiln state as a function of the monitor? And deal with that temporal autocorrelation? We'll train a [random forest](https://en.wikipedia.org/wiki/Random_forest) model of kiln state. Random forests consist of populations of decision trees composed of random subsets of our training set and random subsets of our predictors. We construct a final model by summing across the forest of decision trees.
+```{r model-params}
+set.seed(253)
+task <- TaskClassif$new(id = "wind",
+                        backend = wdf,
+                        target = "grouping")
+taskNoDate <- task$select(setdiff(task$feature_names, "date"))
+
+OVER <- ceiling(sum(wdf$grouping==0)/sum(wdf$grouping==1))
+po_over <- po("classbalancing",
+             id = "oversample",
+             adjust = "minor",
+             reference = "minor",
+             shuffle = FALSE,
+             ratio = OVER)
+
+learner <- lrn("classif.ranger",
+               num.trees = to_tune(2, 250, logscale = FALSE),
+               predict_type = "prob")
+learner_over <- as_learner(po_over %>>% learner)
+
+WHICH_TASK <- taskNoDate
+WHICH_LEARNER <- learner_over
+TRAIN_PCT <- 0.1
+RSMP_PCT <- 0.1
+
+train_set <- sample(WHICH_TASK$nrow,
+                    TRAIN_PCT * WHICH_TASK$nrow)
+test_set <- setdiff(seq_len(WHICH_TASK$nrow),
+                    train_set)
+acf(wdf$so2)
+acf(wdf[sort(train_set),"so2"])
+```
+```{r model-train, results='hide'}
+m <- AutoTuner$new(
+  learner = WHICH_LEARNER,
+  resampling = rsmp("holdout", ratio = RSMP_PCT),
+  measure = msr("classif.specificity"),
+  terminator = trm("evals", n_evals = 5),
+  tuner = tnr("random_search"))
+m$train(WHICH_TASK, row_ids = train_set)
+```
+```{r model-predict}
+prediction <- m$predict(WHICH_TASK, row_ids = test_set)
+m$model
+prediction$confusion
+measure <- msrs(c("classif.acc",
+                  "classif.sensitivity",
+                  "classif.specificity",
+                  "classif.fbeta"))
+prediction$score(measure)
+```
+Okay, so this a pretty poor model of kiln behavior. But it's not worthless, and we dealt with a fair amount of the autocorrelation. Basically, when the model guesses "kilns are off," it's correct about `r round(100*prediction$confusion[2,2]/(prediction$confusion[2,2]+prediction$confusion[2,1]),1)` percent of the time, and over the test set, it catches about `r round(100*prediction$confusion[2,2]/(prediction$confusion[2,2]+prediction$confusion[1,2]),1)` percent of the cases. Given that the cases in question appear in about `r round(100*sum(wdf[test_set,"grouping"] == 1)/length(test_set),1)` percent of the dataset, a random guesser (that just guessed "OFF" `r round(100*sum(wdf[test_set,"grouping"] == 1)/length(test_set),1)` percent of the time) would have only captured ~`r round(100*sum((rbinom(length(test_set),1,sum(wdf[test_set,"grouping"] == 1)/length(test_set)) == 1) & wdf[test_set,"grouping"] == 1)/length(test_set),1)` percent of cases in the test set, given their temporal distribution. (You can't see it, but the numbers in that last sentence were generated on the fly by a random binomial distribution model we ran at the time this document was compiled.) We're doing better than the random guesser.
+
+So what's going on inside the model?
+```{r feature-importance}
+x <- wdf %>% select(so2:peak_slope)
+model <- Predictor$new(m, data = x, y = wdf$grouping)
+f <- names(x)
+effect <- FeatureEffects$new(model)
+plot(effect, features = f)
+
+impo <- FeatureImp$new(model, loss = "ce")
+impo$plot(features = f)
+```
+('1' in the effect plot above -- not the feature importance chart -- refers to the OFF state.) Check out that direction plot -- big effect of southerly winds (i.e. wind blowing to the north) on the probability of the OFF state. OFF also appears to be related to higher wind speeds and instances in which the wind is shifting into a southerly direction. The SO2 figures are important but trickier to interpret. Part of the reason that's true is there are (presumably) two effects captured at once here: Rising SO2 may trigger a change in the firm's behavior *and* a change in the firm's behavior may spur change in recordings at the monitor. Anecdotally, that interpretation maps on to the v-shaped `so2_slope` effect and the swoosh-shaped `so2` effect.
+
+Now let's load in and transform the new data from TCEQ, run it through the model, and see what (if any) inferences we can make about the missing kiln states.
+```{r model-df-new, cache=TRUE}
+wNso2 <- read_delim(here('dat/raw/txt/TCEQ5min.txt'),
+                 col_types = cols(
+                   Date = col_character(),
+                   Time = col_time(),
+                   `1071_Sulfur Dioxide_1` = col_character()
+                )
+              )
+colnames(wNso2) <- c("day",
+                     "time",
+                     "so2")
+wNso2$date <- parse_date_time(paste(wNso2$day,
+                                    wNso2$time),
+                              orders = "%Y%m%d %H:%M:%S")
+wNso2$so2 <- wNso2$so2 %>% gsub("‐","-",.) %>% as.numeric()
+wNso2 <- wNso2 %>% 
+  mutate_if(is.numeric,
+            ~replace_na(.,mean(., na.rm = TRUE))) %>%
+  drop_na() %>%
+  mutate(y = year(date),
+         m = month(date), 
+         d = day(date),
+         h = hour(date)) %>%
+  group_by(y,m,d,h) %>%
+  summarise(across(date, first),
+            across(so2, mean, na.rm = TRUE)) %>%
+  ungroup() %>%
+  select(date,
+         so2) %>%
+  filter(date > as.Date("2019-07-05"))
+
+wNwind <- read_csv(here('dat/clean/csv/PortArthurWind.csv'),
+                   skip = 1)
+wNwind$date <- parse_date_time(paste0(wNwind$YY,
+                                      wNwind$MM,
+                                      wNwind$DD," ",
+                                      wNwind$hh,
+                                      wNwind$mm),
+                           orders = "%Y%m%d %H%M")
+is.na(wNwind$WSPD) <- wNwind$WSPD == 99
+is.na(wNwind$WDIR) <- wNwind$WDIR == 999
+is.na(wNwind$GST) <- wNwind$GST == 99
+wNwind <- wNwind %>% select(date,WSPD,WDIR,GST,YY,MM,DD,hh) %>%
+  mutate_if(is.numeric,
+            ~replace_na(.,mean(., na.rm = TRUE))) %>%
+  drop_na() %>%
+  group_by(YY,MM,DD,hh) %>%
+  summarise(across(date, first),
+            across(WSPD:GST, mean, na.rm = TRUE)) %>%
+  ungroup() %>%
+  select(date,
+         WSPD,
+         WDIR,
+         GST) %>%
+  filter(date > as.Date("2019-07-05"))
+colnames(wNwind) <- c("date",
+                      "speed",
+                      "dir",
+                      "peak")
+
+wNdf <- wNso2 %>% merge(wNwind)
+
+wNdf$dir <- cos( wNdf$dir * (pi/180) )
+wNdf$speed <- wNdf$speed * 2.23694
+wNdf$peak <- wNdf$peak * 2.23694
+
+wNdf$interval <- get_intervals(wNdf)
+wNdf <- wNdf %>%
+  mutate(across(so2:peak, ~ .x, .names = '{col}_sd')) %>%
+  mutate(across(so2:peak, ~ .x, .names = '{col}_slope')) %>%
+  group_by(interval) %>%
+  summarise(across(date, first),
+            across(so2:peak, mean, na.rm = TRUE),
+            across(so2_sd:peak_sd, sd),
+            across(so2_slope:peak_slope, slope)) %>%
+  mutate_if(is.numeric,
+            ~replace_na(.,mean(., na.rm = TRUE))) %>%
+  drop_na() %>%
+  ungroup() %>%
+  select(date:peak_slope)
+```
+Moment of faith:
+```{r model-new-pred}
+newPrediction <- m$predict_newdata(wNdf,
+                                   task = WHICH_TASK)
+```
+Kind of anti-climactic, huh? Here's what happened: Recall that working with the test data, the classifier made 'OFF' predictions `r round(100*sum(as.integer(prediction$response)-1) / length(test_set),1)` percent of the time. (It was correct only `r round(100*prediction$confusion[2,2]/(prediction$confusion[2,2]+prediction$confusion[2,1]),1)` percent of the time, but captured `r round(100*prediction$confusion[2,2]/(prediction$confusion[2,2]+prediction$confusion[1,2]),1)` percent of OFF cases.)
+
+Working with the *new* data from TCEQ, the classifier made 'OFF' predictions `r round(100*sum(as.integer(newPrediction$response)-1) / nrow(wNdf),1)` percent of the time. Infer what you will...
+
+And take a look at those datasets stacked up against one another:
+```{r summary-stats}
+vizdf <- wNdf %>%
+  mutate(grouping = 2) %>%
+  rbind(wdf) %>%
+  group_by(grouping)
+skim(vizdf)
+
+ggplot(vizdf, aes(x = grouping, y = dir)) + 
+  ggdist::stat_halfeye(
+    adjust = .5, 
+    width = .6, 
+    .width = 0, 
+    justification = -.3, 
+    point_colour = NA) + 
+  geom_boxplot(
+    width = .25, 
+    outlier.shape = NA
+  ) +
+  geom_point(
+    size = 1.3,
+    alpha = .3,
+    position = position_jitter(
+      seed = 1, width = .1
+    )
+  ) + 
+  coord_cartesian(xlim = c(1.2, NA), clip = "off")
+
+ggplot(vizdf, aes(x = grouping, y = speed)) + 
+  ggdist::stat_halfeye(
+    adjust = .5, 
+    width = .6, 
+    .width = 0, 
+    justification = -.3, 
+    point_colour = NA) + 
+  geom_boxplot(
+    width = .25, 
+    outlier.shape = NA
+  ) +
+  geom_point(
+    size = 1.3,
+    alpha = .3,
+    position = position_jitter(
+      seed = 1, width = .1
+    )
+  ) + 
+  coord_cartesian(xlim = c(1.2, NA), clip = "off")
+
+ggplot(vizdf, aes(x = grouping, y = so2)) + 
+  ggdist::stat_halfeye(
+    adjust = .5, 
+    width = .6, 
+    .width = 0, 
+    justification = -.3, 
+    point_colour = NA) + 
+  geom_boxplot(
+    width = .25, 
+    outlier.shape = NA
+  ) +
+  geom_point(
+    size = 1.3,
+    alpha = .3,
+    position = position_jitter(
+      seed = 1, width = .1
+    )
+  ) + 
+  coord_cartesian(xlim = c(1.2, NA), clip = "off")
+```
+Okay!
+```{r model-ac}
+# work in progress
+# requires dev version of {mlr3spatiotempcv}
+
+# set.seed(206)
+# cv = rsmp("repeated_cv", folds = 5, repeats = 2)
+# cv$instantiate(taskNoDate)
+# rNT = mlr3::resample(
+#   task = taskNoDate, learner = learner,
+#   resampling = cv)
+# 
+# taskT = task$set_col_roles("date", roles = "time")
+# cvT = rsmp("sptcv_cstf", folds = 5)
+# cvT$instantiate(taskT)
+# rT = mlr3::resample(
+#   task = taskT, learner = learner,
+#   resampling = cvT)
+# 
+# rNT$aggregate(measures = measure)
+# rT$aggregate(measures = measure)
+```
+(That section is under development but would also seem to suggest we've dealt sufficiently with the temporal autocorrelation problem.)
+```{r, session-info}
+sessionInfo()
+```
+
+\
+<div class="tocify-extend-page" data-unique="tocify-extend-page" style="height: 0;"></div>
